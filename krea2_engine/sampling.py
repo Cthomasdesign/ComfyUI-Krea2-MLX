@@ -93,10 +93,14 @@ def sample(
     x2 = (maxres // align) ** 2
     ts = timesteps(img.shape[1], steps, x1, x2, y1=y1, y2=y2, mu=mu)
 
+    # step-invariant conditioning (text fusion, rope, masks) — computed once, reused every step
+    fused_ctx, cos, sin, add_mask = transformer.prepare_conditioning(ctx, pos, full_mask, dtype)
+    mx.eval(fused_ctx, cos, sin, *([add_mask] if add_mask is not None else []))
+
     total = len(ts) - 1
     for i, (tc, tp) in enumerate(zip(ts[:-1], ts[1:])):
         t = mx.full((n,), tc, dtype=dtype)
-        v = transformer(img, ctx, t, pos, full_mask)
+        v = transformer.denoise_step(img, fused_ctx, t, cos, sin, add_mask)
         if cfg:
             raise NotImplementedError("CFG path not needed for turbo")
         img = img + (tp - tc) * v

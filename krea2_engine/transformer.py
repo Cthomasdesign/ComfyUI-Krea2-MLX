@@ -269,6 +269,34 @@ class SingleStreamDiT(nn.Module):
             x = layer(x)
         return x
 
+    def prepare_conditioning(self, context, pos, mask, dtype):
+        """Step-invariant work (text fusion, RoPE tables, attention masks), computed once per
+        generation and reused across denoising steps. Bit-identical to running it per step.
+
+        context: (B, seq, n_layers, txtdim); pos: (L, 3); mask: (B, L) validity {0,1}.
+        Returns (fused_ctx, cos, sin, full_mask)."""
+        txtlen = context.shape[1]
+        txtmask = _additive_mask(mask[:, :txtlen], dtype)
+        context = self.txtfusion(context, mask=txtmask)
+        context = self._run_seq(self.txtmlp, context)
+        cos, sin = _make_rope(pos.astype(mx.float32), self.axes, self.cfg.theta)
+        full_mask = _additive_mask(mask, dtype)
+        return context, cos, sin, full_mask
+
+    def denoise_step(self, img, fused_ctx, t, cos, sin, full_mask):
+        """One velocity evaluation. img: (B, Limg, channels*patch^2); t: (B,)."""
+        img = self.first(img)
+        t_emb = self._run_seq(self.tmlp, _timestep_embed(t, self.cfg.tdim).astype(img.dtype))  # (B,1,feat)
+        tvec = self._run_seq(self.tproj, t_emb)  # (B,1,6*feat)
+
+        txtlen = fused_ctx.shape[1]
+        combined = mx.concatenate([fused_ctx, img], axis=1)
+        for block in self.blocks:
+            combined = block(combined, tvec, cos, sin, full_mask)
+
+        final = self.last(combined, t_emb)
+        return final[:, txtlen : txtlen + img.shape[1], :]
+
     def __call__(
         self,
         img: mx.array,  # (B, Limg, channels*patch^2)
@@ -277,22 +305,5 @@ class SingleStreamDiT(nn.Module):
         pos: mx.array,  # (L, 3) positions for [txt; img]
         mask: mx.array,  # (B, L) validity {0,1}
     ) -> mx.array:
-        img = self.first(img)
-        t_emb = self._run_seq(self.tmlp, _timestep_embed(t, self.cfg.tdim).astype(img.dtype))  # (B,1,feat)
-        tvec = self._run_seq(self.tproj, t_emb)  # (B,1,6*feat)
-
-        txtlen = context.shape[1]
-        txt_valid = mask[:, :txtlen]
-        txtmask = _additive_mask(txt_valid, img.dtype)
-        context = self.txtfusion(context, mask=txtmask)
-        context = self._run_seq(self.txtmlp, context)
-
-        combined = mx.concatenate([context, img], axis=1)
-        cos, sin = _make_rope(pos.astype(mx.float32), self.axes, self.cfg.theta)
-        full_mask = _additive_mask(mask, img.dtype)
-
-        for block in self.blocks:
-            combined = block(combined, tvec, cos, sin, full_mask)
-
-        final = self.last(combined, t_emb)
-        return final[:, txtlen : txtlen + img.shape[1], :]
+        fused_ctx, cos, sin, full_mask = self.prepare_conditioning(context, pos, mask, img.dtype)
+        return self.denoise_step(img, fused_ctx, t, cos, sin, full_mask)
