@@ -7,6 +7,9 @@
 outputs/
 output/
 
+# Local benchmark results + parity reference outputs (machine-specific, weights-derived)
+tools/reference/
+
 # Python
 __pycache__/
 *.pyc
