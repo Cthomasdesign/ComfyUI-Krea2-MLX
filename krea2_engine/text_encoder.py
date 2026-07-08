@@ -139,6 +139,46 @@ class Qwen3TextModel(nn.Module):
         all_hs.append(h)              # final (index == num_layers)
         return all_hs                 # all_hs[i] == HF hidden_states[i]
 
+    def _mrope(self, pos3d):
+        """Interleaved multimodal RoPE (Qwen3-VL). pos3d: (3, L) t/h/w position ids -> (cos, sin)
+        each (L, head_dim). Matches transformers' apply_interleaved_mrope (mrope_section 24/20/20):
+        freq index k<60 takes dim k%3 (T/H/W interleaved), k>=60 takes T."""
+        hd = self.head_dim
+        inv = 1.0 / (self.theta ** (mx.arange(0, hd, 2).astype(mx.float32) / hd))  # (hd/2,)
+        freqs = pos3d[:, :, None].astype(mx.float32) * inv[None, None, :]           # (3, L, hd/2)
+        k = mx.arange(hd // 2)
+        which = mx.where(k < 60, k % 3, 0).astype(mx.int32)                         # (hd/2,) dim per freq
+        idx = mx.broadcast_to(which[None, None, :], (1, freqs.shape[1], hd // 2))
+        ft = mx.take_along_axis(freqs, idx, axis=0)[0]                              # (L, hd/2)
+        emb = mx.concatenate([ft, ft], axis=-1)                                     # (L, hd)
+        return mx.cos(emb), mx.sin(emb)
+
+    def forward_grounded(self, inputs_embeds, pos3d, deepstack_embeds, img_slice):
+        """Grounded decoder pass. inputs_embeds: (1, L, hidden) with image rows already spliced in;
+        pos3d: (3, L) M-RoPE positions; deepstack_embeds: list of (n_img, hidden) added at the image
+        rows after layers 0..len-1; img_slice: (start, end) row range of the image tokens.
+        Returns the HF-indexed hidden-state list (tap SELECT_LAYERS as in __call__)."""
+        h = inputs_embeds
+        L = h.shape[1]
+        cos, sin = self._mrope(pos3d)
+        cos, sin = cos.astype(h.dtype), sin.astype(h.dtype)
+        i0, i1 = img_slice
+        idx = mx.arange(L)
+        mask = ((idx[None, :] > idx[:, None]).astype(mx.float32) * -1e9)[None, None].astype(h.dtype)
+
+        # HF records hidden_states[i+1] as the layer OUTPUT (before deepstack), while deepstack is
+        # still injected into the CONTINUING stream — so tapped layer 2 must exclude its deepstack
+        # add even though later layers see it.
+        all_hs = [h]  # hidden_states[0] = token embeddings
+        for li, layer in enumerate(self.layers):
+            h = layer(h, cos, sin, mask)
+            all_hs.append(h)  # hidden_states[li+1], pre-deepstack
+            if deepstack_embeds is not None and li < len(deepstack_embeds):
+                add = mx.zeros_like(h)
+                add[:, i0:i1, :] = deepstack_embeds[li][None].astype(h.dtype)
+                h = h + add
+        return all_hs
+
 
 def load_text_encoder(repo: str, dtype=mx.float32) -> Qwen3TextModel:
     model = Qwen3TextModel()
@@ -164,12 +204,42 @@ def load_text_encoder(repo: str, dtype=mx.float32) -> Qwen3TextModel:
     return model, len(weights)
 
 
+IMAGE_PAD_ID = 151655       # <|image_pad|>
+VISION_START_ID = 151652    # <|vision_start|>
+# grounded edit template = system prefix + vision block + prompt + assistant suffix
+GROUNDED_TEMPLATE = PREFIX + "<|vision_start|><|image_pad|><|vision_end|>{}" + SUFFIX
+
+
+def _get_rope_index_single(ids, grid_thw, merge):
+    """3-axis M-RoPE position ids (3, L) for one clean sequence with one image block, matching
+    transformers' get_rope_index: text is sequential (t=h=w); the image block's tokens take
+    t=frame, h=row, w=col on the merged grid, offset to continue after the preceding text; text
+    after the image resumes at max(image positions)+1."""
+    gt, gh, gw = int(grid_thw[0]), int(grid_thw[1]) // merge, int(grid_thw[2]) // merge
+    n_img = gt * gh * gw
+    i0 = ids.index(IMAGE_PAD_ID)
+    L = len(ids)
+    pos = np.zeros((3, L), np.int64)
+    pos[:, :i0] = np.arange(i0)                       # text before: sequential
+    t_index = np.repeat(np.arange(gt), gh * gw)
+    h_index = np.tile(np.repeat(np.arange(gh), gw), gt)
+    w_index = np.tile(np.arange(gw), gt * gh)
+    pos[0, i0:i0 + n_img] = t_index + i0
+    pos[1, i0:i0 + n_img] = h_index + i0
+    pos[2, i0:i0 + n_img] = w_index + i0
+    nxt = int(max(t_index.max(), h_index.max(), w_index.max())) + i0 + 1
+    pos[:, i0 + n_img:] = np.arange(L - (i0 + n_img)) + nxt
+    return pos, (i0, i0 + n_img)
+
+
 class Qwen3VLConditioner:
     """Pure-MLX conditioner. Tokenization via HF tokenizer; forward via MLX."""
 
     def __init__(self, repo: str, max_length: int = 512, dtype=mx.float32):
         from transformers import AutoTokenizer
 
+        self.repo = repo
+        self._vision = None
         self.tokenizer = AutoTokenizer.from_pretrained(f"{repo}/tokenizer")
         # guard the hardcoded prefix/suffix token counts (used to slice hidden states) against
         # tokenizer drift — a changed template/version would silently misalign the conditioning
@@ -210,3 +280,53 @@ class Qwen3VLConditioner:
         stacked = stacked[:, prefix_idx:]
         out_mask = valid_mx[:, prefix_idx:]
         return stacked.astype(self.dtype), out_mask
+
+    def _load_vision(self):
+        """Lazily build + load the Qwen3-VL vision tower (visual.* weights, ~1 GB) on first use."""
+        if self._vision is None:
+            import glob
+            import json
+
+            from .vision import VisionConfig, VisionModel
+
+            cfg = VisionConfig.from_dict(
+                json.load(open(f"{self.repo}/text_encoder/config.json"))["vision_config"])
+            vm = VisionModel(cfg)
+            w = {}
+            for sh in sorted(glob.glob(f"{self.repo}/text_encoder/*.safetensors")):
+                for k, v in mx.load(sh).items():
+                    if k.startswith("visual."):
+                        w[k[len("visual."):]] = v.astype(self.dtype)
+            vm.load_weights(list(vm.sanitize(w).items()))
+            mx.eval(vm.parameters())
+            self._vision = vm
+        return self._vision
+
+    def encode_grounded(self, prompt, image, grounding_px=768, return_all=False):
+        """Image-grounded conditioning: run `image` through the Qwen3-VL vision tower, splice the
+        vision tokens into the instruction, run the decoder with deepstack + M-RoPE, and tap the
+        same 12 layers. Returns (ctx (1, seq, 12, 2560), mask) like __call__ — sliced past the
+        system prefix. Torch-free at runtime. Batch size 1."""
+        from .vision.preprocess import preprocess_image
+
+        vm = self._load_vision()
+        pv, grid = preprocess_image(image, grounding_px=grounding_px)
+        img_embeds, deepstack = vm(mx.array(pv), mx.array(grid))
+        mx.eval(img_embeds, *deepstack)
+        n_img = img_embeds.shape[0]
+
+        ids = self.tokenizer(GROUNDED_TEMPLATE.format(prompt))["input_ids"]
+        ip = ids.index(IMAGE_PAD_ID)
+        ids = ids[:ip] + [IMAGE_PAD_ID] * n_img + ids[ip + 1:]  # expand the single pad to N
+        pos3d, img_slice = _get_rope_index_single(ids, grid[0], merge=2)
+
+        h = self.model.embed_tokens(mx.array(np.array(ids, np.int32))[None])  # (1, L, hidden)
+        i0, i1 = img_slice
+        h[:, i0:i1, :] = img_embeds[None].astype(h.dtype)                     # splice vision tokens
+        all_hs = self.model.forward_grounded(h, mx.array(pos3d), list(deepstack), img_slice)
+        stacked = mx.stack([all_hs[i] for i in SELECT_LAYERS], axis=2)        # (1, L, 12, 2560)
+        if return_all:
+            return stacked.astype(self.dtype)
+        stacked = stacked[:, PREFIX_START_IDX:]
+        mask = mx.ones((1, stacked.shape[1]))
+        return stacked.astype(self.dtype), mask

@@ -258,17 +258,31 @@ class Krea2Pipeline:
                      init_latent=init_latent, strength=denoise, step_callback=step_callback)
         return to_pil(dec)
 
-    def generate_edit(self, prompt, image, *, image_b=None, width=1024, height=1024, steps=8,
-                      seed=0, num_images=1, step_callback=None):
+    def generate_edit(self, prompt, image, *, image_b=None, grounding_px=0, width=1024, height=1024,
+                      steps=8, seed=0, num_images=1, step_callback=None):
         """In-context edit: keep `image` (and optional `image_b`) as clean reference frames while
         generating a fresh target guided by `prompt`. Designed for the krea2_edit identity LoRA
-        (stack it via the LoRA node). PIL images in; edited images out."""
+        (stack it via the LoRA node). grounding_px>0 also feeds the source through the Qwen3-VL
+        vision tower so the instruction is read *while looking at the image* (training-matched
+        semantic path); 0 keeps plain-text conditioning. PIL images in; edited images out."""
         width, height, steps, num_images, seed = self._validate(
             prompt, width, height, steps, num_images, seed)
         srcs = [self._encode_image(image, width, height, num_images)]
         if image_b is not None:
             srcs.append(self._encode_image(image_b, width, height, num_images))
-        dec = sample_edit(self.transformer, self.vae, self._encode_cached, [prompt] * num_images,
+
+        gpx = int(grounding_px or 0)
+        if gpx > 0:
+            def enc(prompts):
+                ctx, mask = self.encoder.encode_grounded(prompts[0], image, grounding_px=gpx)
+                if len(prompts) > 1:
+                    ctx = mx.broadcast_to(ctx, (len(prompts), *ctx.shape[1:]))
+                    mask = mx.broadcast_to(mask, (len(prompts), *mask.shape[1:]))
+                return ctx, mask
+        else:
+            enc = self._encode_cached
+
+        dec = sample_edit(self.transformer, self.vae, enc, [prompt] * num_images,
                           srcs, width=width, height=height, steps=steps, seed=seed,
                           step_callback=step_callback)
         return to_pil(dec)

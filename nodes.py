@@ -223,6 +223,9 @@ class Krea2Edit:
                 "steps": ("INT", {"default": 8, "min": 1, "max": 50}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF}),
                 "num_images": ("INT", {"default": 1, "min": 1, "max": 8}),
+                "grounding_px": ("INT", {"default": 768, "min": 0, "max": 1536, "step": 64,
+                                          "tooltip": "0 = plain text; >0 reads the instruction while "
+                                                     "looking at the source via Qwen3-VL (longest side cap)"}),
                 "safety_filter": ("BOOLEAN", {"default": True, "label_on": "on", "label_off": "off"}),
             },
             "optional": {
@@ -236,7 +239,7 @@ class Krea2Edit:
     CATEGORY = "Krea2 MLX"
 
     def generate(self, krea2_pipe, image, prompt, width, height, steps, seed, num_images,
-                 safety_filter=True, image_b=None, lora_stack=None):
+                 grounding_px=768, safety_filter=True, image_b=None, lora_stack=None):
         krea2_pipe.set_loras(lora_stack or [])
         pbar = ProgressBar(steps)
 
@@ -247,6 +250,7 @@ class Krea2Edit:
         imgs = krea2_pipe.generate_edit(
             prompt, _from_image_tensor(image),
             image_b=_from_image_tensor(image_b) if image_b is not None else None,
+            grounding_px=grounding_px,
             width=width, height=height, steps=steps, seed=seed, num_images=num_images,
             step_callback=cb)
         if safety_filter:

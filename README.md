@@ -47,7 +47,7 @@ On first generation the **VAE + Qwen3-VL-4B text encoder** (~9 GB) download auto
 | **Krea2 LoRA (MLX)** | Pick a LoRA from `models/loras` + strength → `KREA2_LORASTACK`. Chain several to stack. |
 | **Krea2 Generate (MLX)** | `KREA2_PIPE` + prompt/size/steps/seed (+ optional LoRA stack) → `IMAGE`. Progress bar + Cancel supported; NSFW `safety_filter` on by default. |
 | **Krea2 Img2Img (MLX)** | `KREA2_PIPE` + source `IMAGE` + prompt + `denoise` (+ optional LoRA stack) → `IMAGE`. VAE-encodes the source and denoises from it; `denoise` 0→1 goes from near-copy to full reinterpretation (`1.0` == plain text→image). |
-| **Krea2 Edit (MLX)** | `KREA2_PIPE` + source `IMAGE` + prompt (+ optional 2nd `image_b`, + LoRA stack) → `IMAGE`. In-context edit: the source rides the sequence as a clean reference frame while a fresh target is generated. Pair with the **krea2_edit identity LoRA** (stack it via the LoRA node) for identity-preserving edits. |
+| **Krea2 Edit (MLX)** | `KREA2_PIPE` + source `IMAGE` + prompt + `grounding_px` (+ optional 2nd `image_b`, + LoRA stack) → `IMAGE`. In-context edit: the source rides the sequence as a clean reference frame while a fresh target is generated. `grounding_px > 0` also reads the instruction *while looking at the source* through the pure-MLX **Qwen3-VL vision tower** (training-matched semantic grounding; `0` = plain text). Pair with the **krea2_edit identity LoRA** (stack it via the LoRA node) for identity-preserving edits. |
 | **Krea2 Unload (MLX)** | Frees the cached model and clears the Metal cache to reclaim memory. |
 
 **Minimal workflow:** `Krea2 Model Loader → Krea2 Generate → Preview Image`.
