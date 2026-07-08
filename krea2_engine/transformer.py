@@ -297,6 +297,30 @@ class SingleStreamDiT(nn.Module):
         final = self.last(combined, t_emb)
         return final[:, txtlen : txtlen + img.shape[1], :]
 
+    def prepare_edit(self, context, src_patched, pos, mask, dtype):
+        """In-context edit conditioning. Same as prepare_conditioning, plus projects the CLEAN
+        source token block(s) through `first` once (fixed across steps). `pos`/`mask` must span the
+        full [text | src(s) | target] sequence. src_patched: (B, srclen, channels*patch^2).
+        Returns (fused_ctx, src_tokens, cos, sin, full_mask)."""
+        fused_ctx, cos, sin, full_mask = self.prepare_conditioning(context, pos, mask, dtype)
+        src_tokens = self.first(src_patched)
+        return fused_ctx, src_tokens, cos, sin, full_mask
+
+    def denoise_step_edit(self, img, fused_ctx, src_tokens, t, cos, sin, full_mask):
+        """Edit velocity: sequence is [text | src(clean) | target]; only the target is returned.
+        `src_tokens` are pre-projected (frame≠0 via RoPE in cos/sin) and fixed across steps."""
+        img = self.first(img)
+        t_emb = self._run_seq(self.tmlp, _timestep_embed(t, self.cfg.tdim).astype(img.dtype))
+        tvec = self._run_seq(self.tproj, t_emb)
+
+        txtlen, srclen = fused_ctx.shape[1], src_tokens.shape[1]
+        combined = mx.concatenate([fused_ctx, src_tokens, img], axis=1)
+        for block in self.blocks:
+            combined = block(combined, tvec, cos, sin, full_mask)
+
+        final = self.last(combined, t_emb)
+        return final[:, txtlen + srclen : txtlen + srclen + img.shape[1], :]
+
     def __call__(
         self,
         img: mx.array,  # (B, Limg, channels*patch^2)

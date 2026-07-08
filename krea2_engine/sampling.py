@@ -150,6 +150,90 @@ def sample(
     return decoded
 
 
+def build_edit_positions(txtlen: int, h_: int, w_: int, n_src: int) -> mx.array:
+    """3-axis RoPE positions for the edit sequence [text | src_1..N | target].
+    Axis 0 is the frame index: sources = 1..N (clean references), target = 0; axes 1/2 are the
+    shared h/w grid. Text positions are all zero (as in build_positions)."""
+    def imgids(frame):
+        ids = np.zeros((h_, w_, 3), np.float32)
+        ids[..., 0] = frame
+        ids[..., 1] = np.arange(h_)[:, None]
+        ids[..., 2] = np.arange(w_)[None, :]
+        return ids.reshape(-1, 3)
+
+    parts = [np.zeros((txtlen, 3), np.float32)]
+    parts += [imgids(i + 1) for i in range(n_src)]  # sources: frames 1..N
+    parts.append(imgids(0))                          # target: frame 0
+    return mx.array(np.concatenate(parts, axis=0))
+
+
+def sample_edit(
+    transformer,
+    vae,
+    encode,            # callable: list[str] -> (context mx, mask mx)
+    prompts,
+    src_latents,       # list of clean VAE latents (n,16,H/8,W/8), on the target grid
+    *,
+    width=1024,
+    height=1024,
+    steps=8,
+    seed=0,
+    dtype=mx.bfloat16,
+    step_callback=None,
+):
+    """In-context edit: the clean source latent(s) ride the sequence as frame≠0 reference tokens
+    while a fresh-noise target is denoised (mirrors krea2_edit's appearance path). Only the target
+    is decoded. Turbo runs guidance=0, so no CFG/negative pass."""
+    patch = transformer.cfg.patch
+    comp = vae.spatial_scale  # 8
+    align = comp * patch
+    width, height = roundup(width, align), roundup(height, align)
+    n = len(prompts)
+
+    lat_h, lat_w = height // comp, width // comp
+    mx.random.seed(seed)
+    noise = mx.random.normal((n, vae.latent_channels, lat_h, lat_w)).astype(dtype)  # fresh target
+
+    ctx, mask = encode(prompts)
+    ctx, mask = _trim_context(ctx, mask)
+    ctx = ctx.astype(dtype)
+    txtlen = ctx.shape[1]
+    h_, w_ = lat_h // patch, lat_w // patch
+
+    img = patchify(noise, patch)  # target tokens (n, h_*w_, 64)
+    n_src = len(src_latents)
+    src_patched = mx.concatenate(
+        [patchify(mx.array(s).astype(dtype), patch) for s in src_latents], axis=1)  # clean sources
+
+    pos = build_edit_positions(txtlen, h_, w_, n_src)
+    # every text/source/target token is valid → all-ones tail; with trimmed text the mask is None
+    full_mask = mx.concatenate([mask, mx.ones((n, (n_src + 1) * h_ * w_))], axis=1)
+
+    x1 = (256 // align) ** 2
+    x2 = (1280 // align) ** 2
+    ts = timesteps(img.shape[1], steps, x1, x2)  # schedule keyed on the target grid, as in sample()
+
+    fused_ctx, src_tokens, cos, sin, add_mask = transformer.prepare_edit(
+        ctx, src_patched, pos, full_mask, dtype)
+    mx.eval(fused_ctx, src_tokens, cos, sin, *([add_mask] if add_mask is not None else []))
+
+    total = len(ts) - 1
+    for i, (tc, tp) in enumerate(zip(ts[:-1], ts[1:])):
+        t = mx.full((n,), tc, dtype=dtype)
+        v = transformer.denoise_step_edit(img, fused_ctx, src_tokens, t, cos, sin, add_mask)
+        img = img + (tp - tc) * v
+        mx.eval(img)
+        if step_callback is not None:
+            step_callback(i + 1, total)
+
+    latent = unpatchify(img, patch, h_, w_, vae.latent_channels)
+    decoded = vae.decode(latent.astype(mx.float32))
+    decoded = mx.clip(decoded, -1, 1) * 0.5 + 0.5
+    decoded = decoded[:, :, 0]
+    mx.eval(decoded)
+    return decoded
+
+
 def to_pil(decoded: mx.array):
     from PIL import Image
 

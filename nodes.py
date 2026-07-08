@@ -210,6 +210,51 @@ class Krea2Img2Img:
         return (_to_image_tensor(imgs),)
 
 
+class Krea2Edit:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "krea2_pipe": (KREA2_PIPE,),
+                "image": ("IMAGE",),
+                "prompt": ("STRING", {"multiline": True, "default": "make the shirt blue"}),
+                "width": ("INT", {"default": 1024, "min": 256, "max": 2048, "step": 16}),
+                "height": ("INT", {"default": 1024, "min": 256, "max": 2048, "step": 16}),
+                "steps": ("INT", {"default": 8, "min": 1, "max": 50}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF}),
+                "num_images": ("INT", {"default": 1, "min": 1, "max": 8}),
+                "safety_filter": ("BOOLEAN", {"default": True, "label_on": "on", "label_off": "off"}),
+            },
+            "optional": {
+                "image_b": ("IMAGE", {"tooltip": "2nd reference (subject) for multi-ref edit LoRAs"}),
+                "lora_stack": (KREA2_LORASTACK,),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "generate"
+    CATEGORY = "Krea2 MLX"
+
+    def generate(self, krea2_pipe, image, prompt, width, height, steps, seed, num_images,
+                 safety_filter=True, image_b=None, lora_stack=None):
+        krea2_pipe.set_loras(lora_stack or [])
+        pbar = ProgressBar(steps)
+
+        def cb(step, total):
+            mm.throw_exception_if_processing_interrupted()  # honor ComfyUI's Cancel button
+            pbar.update_absolute(step, total)
+
+        imgs = krea2_pipe.generate_edit(
+            prompt, _from_image_tensor(image),
+            image_b=_from_image_tensor(image_b) if image_b is not None else None,
+            width=width, height=height, steps=steps, seed=seed, num_images=num_images,
+            step_callback=cb)
+        if safety_filter:
+            from .krea2_engine import safety
+            imgs, _ = safety.apply(imgs, enabled=True)
+        return (_to_image_tensor(imgs),)
+
+
 class Krea2Unload:
     @classmethod
     def INPUT_TYPES(cls):
@@ -234,6 +279,7 @@ NODE_CLASS_MAPPINGS = {
     "Krea2LoRA": Krea2LoRA,
     "Krea2Generate": Krea2Generate,
     "Krea2Img2Img": Krea2Img2Img,
+    "Krea2Edit": Krea2Edit,
     "Krea2Unload": Krea2Unload,
 }
 
@@ -242,5 +288,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Krea2LoRA": "Krea2 LoRA (MLX)",
     "Krea2Generate": "Krea2 Generate (MLX)",
     "Krea2Img2Img": "Krea2 Img2Img (MLX)",
+    "Krea2Edit": "Krea2 Edit (MLX)",
     "Krea2Unload": "Krea2 Unload (MLX)",
 }

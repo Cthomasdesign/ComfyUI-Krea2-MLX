@@ -16,7 +16,7 @@ from mlx import nn
 from mlx.utils import tree_map
 
 from .quant_recipes import mixed_4_8, quantize_bulk
-from .sampling import sample, to_pil
+from .sampling import sample, sample_edit, to_pil
 from .text_encoder import Qwen3VLConditioner
 from .transformer import Krea2Config, SingleStreamDiT
 
@@ -256,4 +256,19 @@ class Krea2Pipeline:
         dec = sample(self.transformer, self.vae, self._encode_cached, [prompt] * num_images,
                      width=width, height=height, steps=steps, guidance=0.0, seed=seed,
                      init_latent=init_latent, strength=denoise, step_callback=step_callback)
+        return to_pil(dec)
+
+    def generate_edit(self, prompt, image, *, image_b=None, width=1024, height=1024, steps=8,
+                      seed=0, num_images=1, step_callback=None):
+        """In-context edit: keep `image` (and optional `image_b`) as clean reference frames while
+        generating a fresh target guided by `prompt`. Designed for the krea2_edit identity LoRA
+        (stack it via the LoRA node). PIL images in; edited images out."""
+        width, height, steps, num_images, seed = self._validate(
+            prompt, width, height, steps, num_images, seed)
+        srcs = [self._encode_image(image, width, height, num_images)]
+        if image_b is not None:
+            srcs.append(self._encode_image(image_b, width, height, num_images))
+        dec = sample_edit(self.transformer, self.vae, self._encode_cached, [prompt] * num_images,
+                          srcs, width=width, height=height, steps=steps, seed=seed,
+                          step_callback=step_callback)
         return to_pil(dec)
