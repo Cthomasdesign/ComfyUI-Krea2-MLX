@@ -1,0 +1,24 @@
+[project]
+name = "comfyui-krea2-mlx"
+description = "Krea-2-Turbo text-to-image on Apple MLX (Apple Silicon), with stackable LoRAs. Runs the MLX pipeline in-process and returns ComfyUI IMAGE tensors."
+version = "0.3.0"
+license = { text = "Krea 2 Community License (model) / MIT (node code)" }
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "mlx-metal>=0.31,<0.32",
+    "mflux>=0.18,<0.19",
+    "transformers>=5.0,<6",
+    "huggingface_hub>=0.26,<2",
+    "requests>=2.28,<3",
+    "numpy>=1.24,<3",
+    "pillow>=10,<13",
+]
+
+[project.urls]
+Repository = "https://github.com/cthomasdesign/ComfyUI-Krea2-MLX"
+
+[tool.comfy]
+PublisherId = "cthomasdesign"
+DisplayName = "Krea2-MLX (Apple Silicon)"
+Icon = ""

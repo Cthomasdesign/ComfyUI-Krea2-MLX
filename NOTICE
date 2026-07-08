@@ -1,0 +1,55 @@
+Krea 2 is licensed under the Krea 2 Community License Agreement.
+For more information, visit https://krea.ai/krea-2-licensing.
+
+------------------------------------------------------------------------
+This repository contains a MODIFIED DERIVATIVE of the Krea Model
+(krea/Krea-2-Turbo). Modifications by avlp12 (ALISVOLATPROPRIIS):
+
+  - Re-implementation of the Krea 2 Turbo transformer, Qwen3-VL-4B text
+    encoder, and flow-matching sampler for Apple MLX.
+  - 8-bit (group-size 64) quantization of the transformer's 28
+    attention + SwiGLU blocks (sensitivity-graded; all other paths bf16).
+
+This is an independent, unofficial port. It is NOT an official Krea
+product and is NOT endorsed by or affiliated with Krea.ai, Inc.
+
+A full copy of the Krea 2 Community License Agreement is included in the
+LICENSE file in this repository. Your use of these weights is governed by
+that agreement (including, e.g., the < $1,000,000 USD annual-revenue
+threshold for Commercial Use and the content-filtering requirements).
+------------------------------------------------------------------------
+
+------------------------------------------------------------------------
+FURTHER MODIFICATIONS in the krea2-mlx-studio fork, by Casey Thomas
+(github.com/Cthomasdesign):
+
+  - LoRA support: a runtime low-rank adapter applied to the (quantized)
+    transformer (krea2/lora.py), Krea2Pipeline.set_loras(), CLI flags,
+    and web-UI controls. The key-mapper handles both the official Krea /
+    diffusers and the ai-toolkit / PEFT LoRA naming conventions.
+
+This fork is independent and unofficial. It is NOT endorsed by or
+affiliated with avlp12 (ALISVOLATPROPRIIS) or Krea.ai, Inc.
+------------------------------------------------------------------------
+
+------------------------------------------------------------------------
+FURTHER MODIFICATIONS in this repository (ComfyUI-Krea2-MLX), by Casey
+Thomas (github.com/Cthomasdesign):
+
+  - The `krea2` engine (transformer, text encoder, sampler, LoRA, safety
+    filter) is VENDORED into this repository as `krea2_engine/`, so this
+    node package has no external git dependency on krea2-mlx-studio.
+    The transformer, text-encoder, sampler, quantization-recipe, LoRA,
+    and safety-filter code is otherwise unmodified. The unused
+    HF-Transformers-based text encoder variant (text_encoder_hf.py) and
+    the auto-download-by-precision helpers (BUILDS/resolve_weights) were
+    dropped as dead code not used by the ComfyUI nodes, which always
+    load an explicit local transformer file chosen via the model loader
+    node.
+  - ComfyUI node wrappers (nodes.py): model loading from
+    ComfyUI/models/krea2, LoRA stacking from ComfyUI/models/loras,
+    generation with progress/cancel support, and memory unloading.
+
+This integration is independent and unofficial. It is NOT endorsed by or
+affiliated with avlp12 (ALISVOLATPROPRIIS) or Krea.ai, Inc.
+------------------------------------------------------------------------

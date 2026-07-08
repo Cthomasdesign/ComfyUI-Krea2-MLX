@@ -1,0 +1,14 @@
+# Never commit weights or generated output
+*.safetensors
+*.gguf
+*.ckpt
+*.pt
+*.bin
+outputs/
+output/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
