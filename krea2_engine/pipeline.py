@@ -11,6 +11,7 @@ import os
 from collections import OrderedDict
 
 import mlx.core as mx
+import numpy as np
 from mlx import nn
 from mlx.utils import tree_map
 
@@ -196,7 +197,9 @@ class Krea2Pipeline:
         self._lora_paths = apply_loras(self.transformer, specs) if specs else []
         self._lora_sig = sig
 
-    def generate(self, prompt, *, width=1024, height=1024, steps=8, seed=0, num_images=1, step_callback=None):
+    @staticmethod
+    def _validate(prompt, width, height, steps, num_images, seed):
+        """Shared prompt/dimension/range checks; returns the coerced ints."""
         if not isinstance(prompt, str) or not prompt.strip():
             raise ValueError("prompt must be a non-empty string.")
         try:  # uniform ValueError for None / non-numeric / inf / nan (not TypeError / OverflowError)
@@ -214,7 +217,43 @@ class Krea2Pipeline:
             raise ValueError(f"num_images must be in [1, 8], got {num_images}.")
         if not 0 <= seed < 2**64:  # mx.random.seed wants a non-negative uint64 (else a bare TypeError)
             raise ValueError(f"seed must be in [0, 2^64), got {seed}.")
+        return width, height, steps, num_images, seed
+
+    def _encode_image(self, image, width, height, num_images):
+        """PIL source image -> clean VAE latent (n,16,H/8,W/8) matching the sampler's latent space.
+        The encoder wants pixels in [-1,1] (decode's *0.5+0.5 inverse); verified round-trip 45 dB."""
+        image = image.convert("RGB").resize((width, height))
+        arr = np.asarray(image, dtype=np.float32) / 255.0            # (H,W,3) in 0..1
+        arr = np.transpose(arr, (2, 0, 1))[None] * 2.0 - 1.0          # (1,3,H,W) in -1..1
+        z = self.vae.encode(mx.array(arr))                            # (1,16,1,H/8,W/8)
+        if z.ndim == 5:
+            z = z[:, :, 0]                                            # drop the T=1 axis
+        if num_images > 1:
+            z = mx.broadcast_to(z, (num_images, *z.shape[1:]))
+        return z
+
+    def generate(self, prompt, *, width=1024, height=1024, steps=8, seed=0, num_images=1, step_callback=None):
+        width, height, steps, num_images, seed = self._validate(
+            prompt, width, height, steps, num_images, seed)
         dec = sample(self.transformer, self.vae, self._encode_cached, [prompt] * num_images,
                      width=width, height=height, steps=steps, guidance=0.0, seed=seed,
                      step_callback=step_callback)
+        return to_pil(dec)
+
+    def generate_img2img(self, prompt, image, *, denoise=0.6, width=1024, height=1024, steps=8,
+                         seed=0, num_images=1, step_callback=None):
+        """Image-to-image: VAE-encode `image` (a PIL image) and start denoising from a noised
+        version of it. denoise=1.0 is exactly txt2img (source ignored); lower keeps more source."""
+        width, height, steps, num_images, seed = self._validate(
+            prompt, width, height, steps, num_images, seed)
+        try:
+            denoise = float(denoise)
+        except (TypeError, ValueError):
+            raise ValueError("denoise must be a number in [0, 1].") from None
+        if not 0.0 <= denoise <= 1.0:
+            raise ValueError(f"denoise must be in [0, 1], got {denoise}.")
+        init_latent = self._encode_image(image, width, height, num_images)
+        dec = sample(self.transformer, self.vae, self._encode_cached, [prompt] * num_images,
+                     width=width, height=height, steps=steps, guidance=0.0, seed=seed,
+                     init_latent=init_latent, strength=denoise, step_callback=step_callback)
         return to_pil(dec)

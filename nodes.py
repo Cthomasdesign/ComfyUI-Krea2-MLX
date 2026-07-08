@@ -61,6 +61,14 @@ def _to_image_tensor(pil_images):
     return torch.from_numpy(np.stack(arrs, axis=0))
 
 
+def _from_image_tensor(image):
+    """ComfyUI IMAGE tensor [B, H, W, C] in 0..1 -> the first frame as a PIL image."""
+    from PIL import Image
+
+    arr = (image[0].cpu().numpy() * 255.0).round().clip(0, 255).astype(np.uint8)
+    return Image.fromarray(arr)
+
+
 def _get_pipe(model_file):
     if model_file not in _PIPE_CACHE:
         _PIPE_CACHE.clear()          # free the previous build first
@@ -159,6 +167,49 @@ class Krea2Generate:
         return (_to_image_tensor(imgs),)
 
 
+class Krea2Img2Img:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "krea2_pipe": (KREA2_PIPE,),
+                "image": ("IMAGE",),
+                "prompt": ("STRING", {"multiline": True, "default": "a fox in the snow"}),
+                "denoise": ("FLOAT", {"default": 0.6, "min": 0.0, "max": 1.0, "step": 0.05}),
+                "width": ("INT", {"default": 1024, "min": 256, "max": 2048, "step": 16}),
+                "height": ("INT", {"default": 1024, "min": 256, "max": 2048, "step": 16}),
+                "steps": ("INT", {"default": 8, "min": 1, "max": 50}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF}),
+                "num_images": ("INT", {"default": 1, "min": 1, "max": 8}),
+                "safety_filter": ("BOOLEAN", {"default": True, "label_on": "on", "label_off": "off"}),
+            },
+            "optional": {"lora_stack": (KREA2_LORASTACK,)},
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "generate"
+    CATEGORY = "Krea2 MLX"
+
+    def generate(self, krea2_pipe, image, prompt, denoise, width, height, steps, seed, num_images,
+                 safety_filter=True, lora_stack=None):
+        krea2_pipe.set_loras(lora_stack or [])
+        pbar = ProgressBar(steps)
+
+        def cb(step, total):
+            mm.throw_exception_if_processing_interrupted()  # honor ComfyUI's Cancel button
+            pbar.update_absolute(step, total)
+
+        imgs = krea2_pipe.generate_img2img(prompt, _from_image_tensor(image), denoise=denoise,
+                                           width=width, height=height, steps=steps, seed=seed,
+                                           num_images=num_images, step_callback=cb)
+        # NSFW content filter (on by default). The Krea 2 Community License (§4.2) requires
+        # reasonable content-filtering in deployments; flagged images are redacted.
+        if safety_filter:
+            from .krea2_engine import safety
+            imgs, _ = safety.apply(imgs, enabled=True)
+        return (_to_image_tensor(imgs),)
+
+
 class Krea2Unload:
     @classmethod
     def INPUT_TYPES(cls):
@@ -182,6 +233,7 @@ NODE_CLASS_MAPPINGS = {
     "Krea2ModelLoader": Krea2ModelLoader,
     "Krea2LoRA": Krea2LoRA,
     "Krea2Generate": Krea2Generate,
+    "Krea2Img2Img": Krea2Img2Img,
     "Krea2Unload": Krea2Unload,
 }
 
@@ -189,5 +241,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Krea2ModelLoader": "Krea2 Model Loader (MLX)",
     "Krea2LoRA": "Krea2 LoRA (MLX)",
     "Krea2Generate": "Krea2 Generate (MLX)",
+    "Krea2Img2Img": "Krea2 Img2Img (MLX)",
     "Krea2Unload": "Krea2 Unload (MLX)",
 }

@@ -83,6 +83,8 @@ def sample(
     y2=1.15,
     mu=None,
     init_noise=None,   # (n,16,H/8,W/8) to match a PT run; else MLX RNG
+    init_latent=None,  # (n,16,H/8,W/8) clean source latent for img2img (VAE-encoded); else txt2img
+    strength=1.0,      # img2img denoise strength: 1.0 = full (== txt2img), lower keeps more source
     dtype=mx.bfloat16,
     step_callback=None,  # called as step_callback(step, total) after each denoising step
 ):
@@ -113,6 +115,17 @@ def sample(
     x1 = (minres // align) ** 2
     x2 = (maxres // align) ** 2
     ts = timesteps(img.shape[1], steps, x1, x2, y1=y1, y2=y2, mu=mu)
+
+    # img2img: enter the (rectified-flow) schedule partway and start from a noised source latent.
+    # x_t = (1-t)·z0 + t·noise, matching the loop's `img += (tp-tc)·v` (t: 1→0, noise at t=1). We
+    # enter at the first schedule point t ≤ strength. strength≥1.0 (or no source) is a no-op, so
+    # the txt2img path below is byte-identical to before.
+    if init_latent is not None and strength < 1.0:
+        z0 = patchify(mx.array(init_latent).astype(dtype), patch)  # (n, h_*w_, 64), clean source
+        k = next((i for i, t in enumerate(ts) if t <= strength), len(ts) - 1)
+        ts = ts[k:]
+        t_enter = ts[0]
+        img = (1.0 - t_enter) * z0 + t_enter * img  # img is patchify(noise) here
 
     # step-invariant conditioning (text fusion, rope, masks) — computed once, reused every step
     fused_ctx, cos, sin, add_mask = transformer.prepare_conditioning(ctx, pos, full_mask, dtype)

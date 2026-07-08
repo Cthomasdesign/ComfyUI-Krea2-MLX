@@ -46,6 +46,7 @@ On first generation the **VAE + Qwen3-VL-4B text encoder** (~9 GB) download auto
 | **Krea2 Model Loader (MLX)** | Pick a build from `models/krea2` → `KREA2_PIPE` (cached; stays resident). |
 | **Krea2 LoRA (MLX)** | Pick a LoRA from `models/loras` + strength → `KREA2_LORASTACK`. Chain several to stack. |
 | **Krea2 Generate (MLX)** | `KREA2_PIPE` + prompt/size/steps/seed (+ optional LoRA stack) → `IMAGE`. Progress bar + Cancel supported; NSFW `safety_filter` on by default. |
+| **Krea2 Img2Img (MLX)** | `KREA2_PIPE` + source `IMAGE` + prompt + `denoise` (+ optional LoRA stack) → `IMAGE`. VAE-encodes the source and denoises from it; `denoise` 0→1 goes from near-copy to full reinterpretation (`1.0` == plain text→image). |
 | **Krea2 Unload (MLX)** | Frees the cached model and clears the Metal cache to reclaim memory. |
 
 **Minimal workflow:** `Krea2 Model Loader → Krea2 Generate → Preview Image`.
