@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 
 import mlx.core as mx
 import numpy as np
@@ -34,6 +35,25 @@ def build_positions(b: int, txtlen: int, h_: int, w_: int) -> mx.array:
     imgids[..., 2] = np.arange(w_)[None, :]
     pos = np.concatenate([txtpos, imgids.reshape(-1, 3)], axis=0)
     return mx.array(pos)
+
+
+def _trim_context(ctx, mask):
+    """Drop text positions that are padding in every row (layout: [prompt, padding, suffix]).
+
+    Mathematically exact: padded keys get exactly-zero attention weight (the -1e9 additive
+    mask underflows exp to 0), text RoPE positions are all zero, and only image-token outputs
+    are used. The shorter sequence does tile the bf16 kernels differently, so a fixed seed
+    renders equal-quality but not bit-identical images vs the padded path — set
+    KREA2_EXACT_LEGACY=1 to keep the old padded behavior (slower). Keeps the union of valid
+    columns, so mixed-length batches stay correct via the per-row mask."""
+    if os.environ.get("KREA2_EXACT_LEGACY"):
+        return ctx, mask
+    valid = np.array(mask) > 0.5  # (B, L)
+    keep = np.flatnonzero(valid.any(axis=0))
+    if len(keep) == valid.shape[1]:
+        return ctx, mask
+    idx = mx.array(keep.astype(np.int32))
+    return mx.take(ctx, idx, axis=1), mx.take(mask, idx, axis=1)
 
 
 def timesteps(seq_len, steps, x1, x2, y1=0.5, y2=1.15, sigma=1.0, mu=None):
@@ -81,6 +101,7 @@ def sample(
         noise = mx.array(init_noise).astype(dtype)
 
     ctx, mask = encode(prompts)
+    ctx, mask = _trim_context(ctx, mask)
     ctx = ctx.astype(dtype)
     txtlen = ctx.shape[1]
     h_, w_ = lat_h // patch, lat_w // patch
