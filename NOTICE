@@ -39,13 +39,22 @@ Thomas (github.com/Cthomasdesign):
   - The `krea2` engine (transformer, text encoder, sampler, LoRA, safety
     filter) is VENDORED into this repository as `krea2_engine/`, so this
     node package has no external git dependency on krea2-mlx-studio.
-    The transformer, text-encoder, sampler, quantization-recipe, LoRA,
-    and safety-filter code is otherwise unmodified. The unused
-    HF-Transformers-based text encoder variant (text_encoder_hf.py) and
-    the auto-download-by-precision helpers (BUILDS/resolve_weights) were
-    dropped as dead code not used by the ComfyUI nodes, which always
-    load an explicit local transformer file chosen via the model loader
-    node.
+    The unused HF-Transformers-based text encoder variant
+    (text_encoder_hf.py) and the auto-download-by-precision helpers
+    (BUILDS/resolve_weights) were dropped as dead code not used by the
+    ComfyUI nodes, which always load an explicit local transformer file
+    chosen via the model loader node.
+  - Performance modifications to the vendored engine (v0.4.0):
+    native grouped-query attention in the fused SDPA kernels (no K/V
+    head repetition); step-invariant conditioning (text fusion, RoPE
+    tables, attention masks) hoisted out of the denoising loop; padded
+    text tokens trimmed before the DiT; dynamic-length text encoding
+    (pad to longest-in-batch with preserved absolute RoPE positions);
+    and a per-prompt embedding cache in the pipeline. Mathematically
+    faithful to the reference computation (validated); note that the
+    sequence-length changes alter bf16 kernel rounding order, so fixed
+    seeds render equal-quality but not bit-identical images vs earlier
+    versions. Set KREA2_EXACT_LEGACY=1 for the pre-0.4 exact behavior.
   - ComfyUI node wrappers (nodes.py): model loading from
     ComfyUI/models/krea2, LoRA stacking from ComfyUI/models/loras,
     generation with progress/cancel support, and memory unloading.

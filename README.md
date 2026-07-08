@@ -59,6 +59,30 @@ On first generation the **VAE + Qwen3-VL-4B text encoder** (~9 GB) download auto
   Community License (§4.2) requires reasonable content-filtering in deployments — keep it on there.
 - Where required by law, disclose that outputs are AI-generated (License §4.3).
 
+## Performance
+
+v0.4.0 optimizes the vendored engine — measured on an M1 Max 32 GB (mixed-4/8 build, 8 steps):
+
+| | v0.3 | v0.4 | faster |
+|---|---|---|---|
+| 512², short prompt | ~103s | **~67s** | ~35% |
+| 512², long prompt | ~104s | **~72s** | ~31% |
+| 1024² | ~310s | **~263s** | ~15% |
+
+Repeat generations with the same prompt (e.g. seed sweeps) additionally skip the text encoder
+entirely via a per-prompt embedding cache.
+
+What changed: native grouped-query attention; step-invariant conditioning hoisted out of the
+denoising loop; padded text tokens trimmed before the DiT (~30% of the sequence at 512²);
+dynamic-length text encoding; prompt-embedding cache. All changes are validated mathematically
+faithful to the reference computation (see `tools/parity.py`).
+
+**Seed reproducibility:** the sequence-length changes alter bf16 kernel rounding order, so a
+fixed seed renders an *equal-quality but not pixel-identical* image vs v0.3 — the same class of
+change as an MLX or hardware upgrade. Within v0.4, generation is fully deterministic (same
+seed → same image). To re-render pre-0.4 seeds exactly, set `KREA2_EXACT_LEGACY=1` (slower;
+restores padded encoding/attention and bypasses the cache).
+
 ## License & attribution
 
 Independent, unofficial — **not** an official Krea product or endorsed by Krea. The model is a
