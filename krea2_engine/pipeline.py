@@ -8,6 +8,7 @@ license there). The VAE reuses mflux's `QwenVAE` — install with `pip install m
 from __future__ import annotations
 
 import os
+from collections import OrderedDict
 
 import mlx.core as mx
 from mlx import nn
@@ -20,6 +21,7 @@ from .transformer import Krea2Config, SingleStreamDiT
 
 BASE_REPO = "krea/Krea-2-Turbo"
 _CACHE = os.path.expanduser("~/.cache/krea2_alis_mlx")
+_PROMPT_CACHE_MAX = 8  # cached prompt embeddings (a few MB each after dynamic-length encoding)
 
 
 def _http_download(repo: str, filename: str, dest_root: str) -> str:
@@ -146,6 +148,41 @@ class Krea2Pipeline:
         self.encoder = Qwen3VLConditioner(base, dtype=mx.bfloat16)
         self._lora_sig: tuple = ()   # currently-applied (path, scale) set, to skip redundant rebuilds
         self._lora_paths: list = []  # wrapped target paths, for clean unload
+        self._prompt_cache: "OrderedDict" = OrderedDict()  # prompt -> (ctx, mask), LRU
+
+    def _encode_cached(self, prompts):
+        """Encoder wrapper: cache embeddings per unique prompt (LRU) and assemble batches from
+        cached rows — repeat generations with the same prompt (seed sweeps) skip the encoder
+        entirely, and num_images>1 encodes its prompt once instead of once per image.
+        Bit-exact: cache hits return the same arrays a fresh encode produced. LoRA-safe: LoRAs
+        wrap only the DiT, never the encoder. KREA2_EXACT_LEGACY=1 bypasses the cache."""
+        if os.environ.get("KREA2_EXACT_LEGACY"):
+            return self.encoder(prompts)
+        missing = [p for p in dict.fromkeys(prompts) if p not in self._prompt_cache]
+        if missing:
+            ctx, mask = self.encoder(missing)
+            mx.eval(ctx, mask)
+            for i, p in enumerate(missing):
+                self._prompt_cache[p] = (ctx[i : i + 1], mask[i : i + 1])
+        for p in dict.fromkeys(prompts):
+            self._prompt_cache.move_to_end(p)
+        while len(self._prompt_cache) > _PROMPT_CACHE_MAX:
+            self._prompt_cache.popitem(last=False)
+        rows = [self._prompt_cache[p] for p in prompts]
+        if len(rows) == 1:
+            return rows[0]
+        # rows cached at different times can differ in length; right-pad with mask-0 columns
+        # (equivalent to interior padding: text RoPE positions are all zero and padding is
+        # masked/trimmed downstream)
+        lmax = max(c.shape[1] for c, _ in rows)
+        def _pad(c, m):
+            d = lmax - c.shape[1]
+            if d == 0:
+                return c, m
+            return mx.pad(c, ((0, 0), (0, d), (0, 0), (0, 0))), mx.pad(m, ((0, 0), (0, d)))
+        padded = [_pad(c, m) for c, m in rows]
+        return (mx.concatenate([c for c, _ in padded], axis=0),
+                mx.concatenate([m for _, m in padded], axis=0))
 
     def set_loras(self, specs) -> None:
         """Apply a set of LoRAs (list of (path, scale)) to the transformer, replacing any
@@ -177,7 +214,7 @@ class Krea2Pipeline:
             raise ValueError(f"num_images must be in [1, 8], got {num_images}.")
         if not 0 <= seed < 2**64:  # mx.random.seed wants a non-negative uint64 (else a bare TypeError)
             raise ValueError(f"seed must be in [0, 2^64), got {seed}.")
-        dec = sample(self.transformer, self.vae, self.encoder, [prompt] * num_images,
+        dec = sample(self.transformer, self.vae, self._encode_cached, [prompt] * num_images,
                      width=width, height=height, steps=steps, guidance=0.0, seed=seed,
                      step_callback=step_callback)
         return to_pil(dec)
