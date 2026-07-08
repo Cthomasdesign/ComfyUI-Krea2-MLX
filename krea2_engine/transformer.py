@@ -139,12 +139,7 @@ class Attention(nn.Module):
             q = _apply_rope(q, cos, sin)
             k = _apply_rope(k, cos, sin)
 
-        # GQA: repeat kv heads to match q heads (correctness-first).
-        if self.kvheads != self.heads:
-            rep = self.heads // self.kvheads
-            k = mx.repeat(k, rep, axis=1)
-            v = mx.repeat(v, rep, axis=1)
-
+        # GQA: mx.fast SDPA groups kv heads natively (bit-identical to repeating them).
         out = scaled_dot_product_attention(q, k, v, scale=self.scale, mask=mask)
         out = out.transpose(0, 2, 1, 3).reshape(b, l, self.heads * self.headdim)
         return self.wo(out * mx.sigmoid(gate))

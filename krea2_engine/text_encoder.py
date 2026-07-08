@@ -70,9 +70,7 @@ class Qwen3Attention(nn.Module):
         v = self.v_proj(x).reshape(b, L, self.nkv, self.hd).transpose(0, 2, 1, 3)
         q = _apply_rope(q, cos, sin)
         k = _apply_rope(k, cos, sin)
-        rep = self.nheads // self.nkv
-        k = mx.repeat(k, rep, axis=1)
-        v = mx.repeat(v, rep, axis=1)
+        # GQA: mx.fast SDPA groups kv heads natively (bit-identical to repeating them)
         o = mx.fast.scaled_dot_product_attention(q, k, v, scale=self.scale, mask=mask)
         o = o.transpose(0, 2, 1, 3).reshape(b, L, self.nheads * self.hd)
         return self.o_proj(o)
