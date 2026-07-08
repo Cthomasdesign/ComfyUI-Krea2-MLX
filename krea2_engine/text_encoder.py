@@ -111,18 +111,18 @@ class Qwen3TextModel(nn.Module):
         self.layers = [Qwen3Layer(hidden, nheads, nkv, head_dim, inter, eps) for _ in range(layers)]
         self.norm = Qwen3RMSNorm(hidden, eps)
 
-    def _rope(self, L):
+    def _rope(self, pos):
+        # pos: (L,) absolute position ids (not necessarily contiguous)
         inv = 1.0 / (self.theta ** (mx.arange(0, self.head_dim, 2).astype(mx.float32) / self.head_dim))
-        pos = mx.arange(L).astype(mx.float32)
-        freqs = pos[:, None] * inv[None, :]  # (L, hd/2)
+        freqs = pos.astype(mx.float32)[:, None] * inv[None, :]  # (L, hd/2)
         emb = mx.concatenate([freqs, freqs], axis=-1)  # (L, hd)
         return mx.cos(emb), mx.sin(emb)
 
-    def __call__(self, input_ids, attn_valid):
-        # input_ids: (b,L) int; attn_valid: (b,L) {0,1}
+    def __call__(self, input_ids, attn_valid, pos_ids=None):
+        # input_ids: (b,L) int; attn_valid: (b,L) {0,1}; pos_ids: (L,) absolute positions
         b, L = input_ids.shape
         h = self.embed_tokens(input_ids)
-        cos, sin = self._rope(L)
+        cos, sin = self._rope(pos_ids if pos_ids is not None else mx.arange(L))
         cos, sin = cos.astype(h.dtype), sin.astype(h.dtype)
 
         # causal + padding additive mask (b,1,L,L)
@@ -182,20 +182,30 @@ class Qwen3VLConditioner:
         self.model, self.nloaded = load_text_encoder(repo, dtype)
 
     def __call__(self, prompts: list[str]) -> tuple[mx.array, mx.array]:
+        import os
+
         prefix_idx = PREFIX_START_IDX
+        max_inp_len = self.max_length + prefix_idx - SUFFIX_START_IDX
         text = [PREFIX + p for p in prompts]
         suffix = [SUFFIX] * len(text)
         suf = self.tokenizer(text=suffix, return_tensors="np")
+        # Pad only to the longest prompt in the batch instead of always to max_inp_len; the
+        # suffix keeps its absolute RoPE positions from the padded layout (positions are
+        # assigned by index, and only trailing pad columns are dropped, so real-token rotations
+        # are unchanged). KREA2_EXACT_LEGACY=1 restores the always-max padding.
+        legacy = bool(os.environ.get("KREA2_EXACT_LEGACY"))
         inp = self.tokenizer(
-            text, truncation=True, padding="max_length",
-            max_length=self.max_length + prefix_idx - SUFFIX_START_IDX, return_tensors="np",
+            text, truncation=True, padding="max_length" if legacy else True,
+            max_length=max_inp_len, return_tensors="np",
         )
         input_ids = np.concatenate([inp["input_ids"], suf["input_ids"]], axis=1)
         mask = np.concatenate([inp["attention_mask"], suf["attention_mask"]], axis=1)
+        inp_len = inp["input_ids"].shape[1]
+        pos_ids = np.concatenate([np.arange(inp_len), max_inp_len + np.arange(SUFFIX_START_IDX)])
 
         ids_mx = mx.array(input_ids.astype(np.int32))
         valid_mx = mx.array(mask.astype(np.float32))
-        all_hs = self.model(ids_mx, valid_mx)
+        all_hs = self.model(ids_mx, valid_mx, pos_ids=mx.array(pos_ids.astype(np.int32)))
         stacked = mx.stack([all_hs[i] for i in SELECT_LAYERS], axis=2)  # (b,L,12,2560)
         stacked = stacked[:, prefix_idx:]
         out_mask = valid_mx[:, prefix_idx:]
