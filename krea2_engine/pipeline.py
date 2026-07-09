@@ -149,7 +149,7 @@ class Krea2Pipeline:
         self.encoder = Qwen3VLConditioner(base, dtype=mx.bfloat16)
         self._lora_sig: tuple = ()   # currently-applied (path, scale) set, to skip redundant rebuilds
         self._lora_paths: list = []  # wrapped target paths, for clean unload
-        self._prompt_cache: "OrderedDict" = OrderedDict()  # prompt -> (ctx, mask), LRU
+        self._prompt_cache: OrderedDict = OrderedDict()  # prompt -> (ctx, mask), LRU
 
     def _encode_cached(self, prompts):
         """Encoder wrapper: cache embeddings per unique prompt (LRU) and assemble batches from
@@ -271,7 +271,10 @@ class Krea2Pipeline:
         if image_b is not None:
             srcs.append(self._encode_image(image_b, width, height, num_images))
 
-        gpx = int(grounding_px or 0)
+        try:
+            gpx = max(0, int(grounding_px or 0))
+        except (TypeError, ValueError):
+            raise ValueError(f"grounding_px must be a non-negative integer, got {grounding_px!r}.") from None
         if gpx > 0:
             ground_imgs = [image] + ([image_b] if image_b is not None else [])
             def enc(prompts):

@@ -1,15 +1,24 @@
 """Pure-MLX Qwen3-VL-4B text encoder for Krea-2 conditioning.
 
-Text-only ⇒ mrope collapses to standard rope (all 3 position dims equal), so this
-is a standard Qwen3 decoder (RMSNorm, GQA, per-head QK-norm, rope θ=5e6, head_dim
-128 decoupled from hidden 2560). Returns 12 selected per-layer hidden states stacked
-(B, seq, 12, 2560) + mask, matching krea-2-official/encoder.py. Tokenization uses the
-HF tokenizer (as mflux does); the model forward is pure MLX.
+Two conditioning paths, both tapping the same 12 selected per-layer hidden states
+(B, seq, 12, 2560) that the Krea-2 DiT consumes (matching krea-2-official/encoder.py):
+
+- Text-only (`Qwen3VLConditioner.__call__`): mrope collapses to standard rope (all 3
+  position dims equal), so this is a standard Qwen3 decoder (RMSNorm, GQA, per-head
+  QK-norm, rope θ=5e6, head_dim 128 decoupled from hidden 2560).
+- Image-grounded (`encode_grounded`): the instruction is encoded *while looking at*
+  reference image(s) — vision-tower tokens spliced at <|image_pad|>, deepstack features
+  injected after decoder layers 0..2, interleaved multimodal RoPE (3D t/h/w positions).
+  Validated against the full PyTorch Qwen3-VL reference (see tools/test_grounded*.py).
+
+Tokenization uses the HF tokenizer (as mflux does); all model forwards are pure MLX.
 """
 
 from __future__ import annotations
 
 import glob
+import json
+import os
 
 import mlx.core as mx
 import numpy as np
@@ -25,6 +34,12 @@ PREFIX = (
 SUFFIX = "<|im_end|>\n<|im_start|>assistant\n"
 PREFIX_START_IDX = 34
 SUFFIX_START_IDX = 5
+
+# --- image grounding (Qwen3-VL vision path) ---------------------------------
+IMAGE_PAD_ID = 151655  # <|image_pad|> — placeholder each vision block expands into
+VISION_BLOCK = "<|vision_start|><|image_pad|><|vision_end|>"
+# grounded edit template = system prefix + vision block(s) + instruction + assistant suffix
+GROUNDED_TEMPLATE = PREFIX + VISION_BLOCK + "{}" + SUFFIX
 
 
 class Qwen3RMSNorm(nn.Module):
@@ -207,13 +222,7 @@ def load_text_encoder(repo: str, dtype=mx.float32) -> Qwen3TextModel:
     return model, len(weights)
 
 
-IMAGE_PAD_ID = 151655       # <|image_pad|>
-VISION_START_ID = 151652    # <|vision_start|>
-# grounded edit template = system prefix + vision block + prompt + assistant suffix
-GROUNDED_TEMPLATE = PREFIX + "<|vision_start|><|image_pad|><|vision_end|>{}" + SUFFIX
-
-
-def _get_rope_index(ids, grids, merge):
+def _get_rope_index(ids: list[int], grids: list, merge: int) -> tuple[np.ndarray, list[tuple[int, int]]]:
     """3-axis M-RoPE position ids (3, L) for one clean sequence with any number of image blocks,
     matching transformers' get_rope_index: text tokens are sequential (t=h=w); each image block's
     tokens take t=frame, h=row, w=col on its merged grid, offset to continue after the preceding
@@ -265,8 +274,6 @@ class Qwen3VLConditioner:
         self.model, self.nloaded = load_text_encoder(repo, dtype)
 
     def __call__(self, prompts: list[str]) -> tuple[mx.array, mx.array]:
-        import os
-
         prefix_idx = PREFIX_START_IDX
         max_inp_len = self.max_length + prefix_idx - SUFFIX_START_IDX
         text = [PREFIX + p for p in prompts]
@@ -297,9 +304,6 @@ class Qwen3VLConditioner:
     def _load_vision(self):
         """Lazily build + load the Qwen3-VL vision tower (visual.* weights, ~1 GB) on first use."""
         if self._vision is None:
-            import glob
-            import json
-
             from .vision import VisionConfig, VisionModel
 
             cfg = VisionConfig.from_dict(
@@ -315,7 +319,8 @@ class Qwen3VLConditioner:
             self._vision = vm
         return self._vision
 
-    def encode_grounded(self, prompt, images, grounding_px=768, return_all=False):
+    def encode_grounded(self, prompt: str, images, grounding_px: int = 768,
+                        return_all: bool = False):
         """Image-grounded conditioning: run `images` (one PIL image or a list, training order
         scene-first) through the Qwen3-VL vision tower, splice the vision tokens into the
         instruction (one <vision> block per image), run the decoder with deepstack + M-RoPE, and
@@ -335,8 +340,7 @@ class Qwen3VLConditioner:
             deeps.append(list(d))
             grids.append(grid[0])
 
-        block = "<|vision_start|><|image_pad|><|vision_end|>"
-        template = PREFIX + block * len(images) + "{}" + SUFFIX
+        template = PREFIX + VISION_BLOCK * len(images) + "{}" + SUFFIX
         ids = self.tokenizer(template.format(prompt))["input_ids"]
         counts = [e.shape[0] for e in embeds]
         expanded, k = [], 0

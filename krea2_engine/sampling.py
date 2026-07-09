@@ -142,6 +142,11 @@ def sample(
         if step_callback is not None:
             step_callback(i + 1, total)
 
+    return _decode(vae, img, patch, h_, w_)
+
+
+def _decode(vae, img: mx.array, patch: int, h_: int, w_: int) -> mx.array:
+    """Final token latent -> decoded pixels (n,3,H,W) in 0..1 (shared sampler tail)."""
     latent = unpatchify(img, patch, h_, w_, vae.latent_channels)  # (n,16,lat_h,lat_w)
     decoded = vae.decode(latent.astype(mx.float32))  # (n,3,1,H,W)
     decoded = mx.clip(decoded, -1, 1) * 0.5 + 0.5
@@ -178,6 +183,8 @@ def sample_edit(
     height=1024,
     steps=8,
     seed=0,
+    minres=256,
+    maxres=1280,
     dtype=mx.bfloat16,
     step_callback=None,
 ):
@@ -209,8 +216,8 @@ def sample_edit(
     # every text/source/target token is valid → all-ones tail; with trimmed text the mask is None
     full_mask = mx.concatenate([mask, mx.ones((n, (n_src + 1) * h_ * w_))], axis=1)
 
-    x1 = (256 // align) ** 2
-    x2 = (1280 // align) ** 2
+    x1 = (minres // align) ** 2
+    x2 = (maxres // align) ** 2
     ts = timesteps(img.shape[1], steps, x1, x2)  # schedule keyed on the target grid, as in sample()
 
     fused_ctx, src_tokens, cos, sin, add_mask = transformer.prepare_edit(
@@ -226,12 +233,7 @@ def sample_edit(
         if step_callback is not None:
             step_callback(i + 1, total)
 
-    latent = unpatchify(img, patch, h_, w_, vae.latent_channels)
-    decoded = vae.decode(latent.astype(mx.float32))
-    decoded = mx.clip(decoded, -1, 1) * 0.5 + 0.5
-    decoded = decoded[:, :, 0]
-    mx.eval(decoded)
-    return decoded
+    return _decode(vae, img, patch, h_, w_)
 
 
 def to_pil(decoded: mx.array):
