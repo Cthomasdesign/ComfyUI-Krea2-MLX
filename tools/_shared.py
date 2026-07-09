@@ -49,3 +49,60 @@ def load_pipeline(model_path):
     pipe = Krea2Pipeline(model_path, precision=precision_for(model_path),
                          base_dir=default_base_dir())
     return pipe, time.perf_counter() - t0
+
+
+# --- machine-portable test assets ---------------------------------------------------------
+# The test scripts resolve their model/LoRA/source image through these helpers instead of
+# hardcoded paths: override via env vars, else discover next to the repo checkout.
+
+def _discover(env_var, candidates, what, hint):
+    p = os.environ.get(env_var)
+    if p:
+        if not os.path.isfile(p):
+            raise FileNotFoundError(f"{env_var}={p} does not exist")
+        return p
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+    raise FileNotFoundError(
+        f"No {what} found. Set {env_var}, or place one at: {' or '.join(candidates)}. {hint}")
+
+
+def default_model():
+    """Transformer build for the test scripts (env KREA2_TEST_MODEL, else <repo>/../Models)."""
+    models = os.path.join(os.path.dirname(REPO), "Models")
+    return _discover(
+        "KREA2_TEST_MODEL",
+        [os.path.join(models, f) for f in
+         ("transformer_mixed_4_8.safetensors", "transformer_8bit.safetensors")],
+        "Krea-2 transformer build",
+        "Download from huggingface.co/avlp12/Krea-2-Turbo-Alis-MLX-mixed-4-8.")
+
+
+def default_lora():
+    """Identity-edit LoRA for the edit tests (env KREA2_TEST_LORA, else <repo>/../Models/loras)."""
+    loras = os.path.join(os.path.dirname(REPO), "Models", "loras")
+    return _discover(
+        "KREA2_TEST_LORA",
+        [os.path.join(loras, "krea2_identity_edit_v1.safetensors")],
+        "identity-edit LoRA",
+        "Download from huggingface.co/conradlocke/krea2-identity-edit.")
+
+
+def ref_uint8():
+    """The captured txt2img reference (fox, seed 0, 512²) as a uint8 (H,W,3) array."""
+    import numpy as np
+
+    ref_path = os.path.join(REPO, "tools", "reference", "short_s0_512.npy")
+    if not os.path.isfile(ref_path):
+        raise FileNotFoundError(
+            f"{ref_path} missing — run `parity.py --capture` first to snapshot references.")
+    ref = np.load(ref_path)[0]  # (3,512,512) in 0..1
+    return (np.transpose(ref, (1, 2, 0)) * 255.0).round().clip(0, 255).astype(np.uint8)
+
+
+def fox_source():
+    """The reference render as a PIL image — the standard source image for the feature tests."""
+    from PIL import Image
+
+    return Image.fromarray(ref_uint8())

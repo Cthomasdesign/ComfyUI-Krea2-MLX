@@ -1,18 +1,13 @@
 """Validate the img2img path: strength==1.0 regression, source round-trip, denoise sweep."""
 
-import _shared  # noqa: F401
 import mlx.core as mx
 import numpy as np
 from PIL import Image
 
-from _shared import PROMPT_SHORT, load_pipeline
+from _shared import PROMPT_SHORT, default_model, fox_source, load_pipeline
 
-MODEL = "/Users/caseythomas/Desktop/Krea2ComfyUI/Models/transformer_mixed_4_8.safetensors"
-pipe, _ = load_pipeline(MODEL)
-
-# a real source image: decode an existing parity reference to PIL
-ref = np.load("reference/short_s0_512.npy")[0]  # (3,512,512) 0..1
-src = Image.fromarray((np.transpose(ref, (1, 2, 0)) * 255).round().clip(0, 255).astype(np.uint8))
+pipe, _ = load_pipeline(default_model())
+src = fox_source()
 
 # 1) strength==1.0 must equal txt2img (same prompt/seed/size) — the hard guard
 t2i = pipe.generate(PROMPT_SHORT, width=512, height=512, steps=8, seed=0)[0]
