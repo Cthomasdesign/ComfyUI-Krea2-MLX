@@ -273,8 +273,9 @@ class Krea2Pipeline:
 
         gpx = int(grounding_px or 0)
         if gpx > 0:
+            ground_imgs = [image] + ([image_b] if image_b is not None else [])
             def enc(prompts):
-                ctx, mask = self.encoder.encode_grounded(prompts[0], image, grounding_px=gpx)
+                ctx, mask = self.encoder.encode_grounded(prompts[0], ground_imgs, grounding_px=gpx)
                 if len(prompts) > 1:
                     ctx = mx.broadcast_to(ctx, (len(prompts), *ctx.shape[1:]))
                     mask = mx.broadcast_to(mask, (len(prompts), *mask.shape[1:]))

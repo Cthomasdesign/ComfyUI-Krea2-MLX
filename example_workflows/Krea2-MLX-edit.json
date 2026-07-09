@@ -70,7 +70,7 @@
       "properties": { "Node name for S&R": "Krea2Edit" },
       "widgets_values": [
         "the same person wearing a blue t-shirt",
-        768, 1024, 8, 0, "fixed", 1, true
+        768, 1024, 8, 0, "fixed", 1, 768, true
       ]
     },
     {

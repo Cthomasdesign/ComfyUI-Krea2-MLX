@@ -153,16 +153,16 @@ class Qwen3TextModel(nn.Module):
         emb = mx.concatenate([ft, ft], axis=-1)                                     # (L, hd)
         return mx.cos(emb), mx.sin(emb)
 
-    def forward_grounded(self, inputs_embeds, pos3d, deepstack_embeds, img_slice):
+    def forward_grounded(self, inputs_embeds, pos3d, deepstack_embeds, img_slices):
         """Grounded decoder pass. inputs_embeds: (1, L, hidden) with image rows already spliced in;
-        pos3d: (3, L) M-RoPE positions; deepstack_embeds: list of (n_img, hidden) added at the image
-        rows after layers 0..len-1; img_slice: (start, end) row range of the image tokens.
+        pos3d: (3, L) M-RoPE positions; deepstack_embeds: per-layer concatenated (total_img, hidden)
+        features added at the image rows after layers 0..len-1; img_slices: list of (start, end) row
+        ranges, one per image block (features concatenated in block order).
         Returns the HF-indexed hidden-state list (tap SELECT_LAYERS as in __call__)."""
         h = inputs_embeds
         L = h.shape[1]
         cos, sin = self._mrope(pos3d)
         cos, sin = cos.astype(h.dtype), sin.astype(h.dtype)
-        i0, i1 = img_slice
         idx = mx.arange(L)
         mask = ((idx[None, :] > idx[:, None]).astype(mx.float32) * -1e9)[None, None].astype(h.dtype)
 
@@ -175,7 +175,10 @@ class Qwen3TextModel(nn.Module):
             all_hs.append(h)  # hidden_states[li+1], pre-deepstack
             if deepstack_embeds is not None and li < len(deepstack_embeds):
                 add = mx.zeros_like(h)
-                add[:, i0:i1, :] = deepstack_embeds[li][None].astype(h.dtype)
+                off = 0
+                for s, e in img_slices:
+                    add[:, s:e, :] = deepstack_embeds[li][off:off + (e - s)][None].astype(h.dtype)
+                    off += e - s
                 h = h + add
         return all_hs
 
@@ -210,26 +213,36 @@ VISION_START_ID = 151652    # <|vision_start|>
 GROUNDED_TEMPLATE = PREFIX + "<|vision_start|><|image_pad|><|vision_end|>{}" + SUFFIX
 
 
-def _get_rope_index_single(ids, grid_thw, merge):
-    """3-axis M-RoPE position ids (3, L) for one clean sequence with one image block, matching
-    transformers' get_rope_index: text is sequential (t=h=w); the image block's tokens take
-    t=frame, h=row, w=col on the merged grid, offset to continue after the preceding text; text
-    after the image resumes at max(image positions)+1."""
-    gt, gh, gw = int(grid_thw[0]), int(grid_thw[1]) // merge, int(grid_thw[2]) // merge
-    n_img = gt * gh * gw
-    i0 = ids.index(IMAGE_PAD_ID)
+def _get_rope_index(ids, grids, merge):
+    """3-axis M-RoPE position ids (3, L) for one clean sequence with any number of image blocks,
+    matching transformers' get_rope_index: text tokens are sequential (t=h=w); each image block's
+    tokens take t=frame, h=row, w=col on its merged grid, offset to continue after the preceding
+    text; text after an image resumes at max(image positions)+1. Returns (pos, img_slices)."""
     L = len(ids)
     pos = np.zeros((3, L), np.int64)
-    pos[:, :i0] = np.arange(i0)                       # text before: sequential
-    t_index = np.repeat(np.arange(gt), gh * gw)
-    h_index = np.tile(np.repeat(np.arange(gh), gw), gt)
-    w_index = np.tile(np.arange(gw), gt * gh)
-    pos[0, i0:i0 + n_img] = t_index + i0
-    pos[1, i0:i0 + n_img] = h_index + i0
-    pos[2, i0:i0 + n_img] = w_index + i0
-    nxt = int(max(t_index.max(), h_index.max(), w_index.max())) + i0 + 1
-    pos[:, i0 + n_img:] = np.arange(L - (i0 + n_img)) + nxt
-    return pos, (i0, i0 + n_img)
+    img_slices = []
+    st_idx = 0   # running rope position
+    ig = 0       # image counter
+    i = 0
+    while i < L:
+        if ids[i] == IMAGE_PAD_ID:
+            gt, gh, gw = int(grids[ig][0]), int(grids[ig][1]) // merge, int(grids[ig][2]) // merge
+            n = gt * gh * gw
+            t_index = np.repeat(np.arange(gt), gh * gw)
+            h_index = np.tile(np.repeat(np.arange(gh), gw), gt)
+            w_index = np.tile(np.arange(gw), gt * gh)
+            pos[0, i:i + n] = t_index + st_idx
+            pos[1, i:i + n] = h_index + st_idx
+            pos[2, i:i + n] = w_index + st_idx
+            img_slices.append((i, i + n))
+            st_idx = int(max(t_index.max(), h_index.max(), w_index.max())) + st_idx + 1
+            i += n
+            ig += 1
+        else:
+            pos[:, i] = st_idx      # text token: sequential
+            st_idx += 1
+            i += 1
+    return pos, img_slices
 
 
 class Qwen3VLConditioner:
@@ -302,28 +315,51 @@ class Qwen3VLConditioner:
             self._vision = vm
         return self._vision
 
-    def encode_grounded(self, prompt, image, grounding_px=768, return_all=False):
-        """Image-grounded conditioning: run `image` through the Qwen3-VL vision tower, splice the
-        vision tokens into the instruction, run the decoder with deepstack + M-RoPE, and tap the
-        same 12 layers. Returns (ctx (1, seq, 12, 2560), mask) like __call__ — sliced past the
-        system prefix. Torch-free at runtime. Batch size 1."""
+    def encode_grounded(self, prompt, images, grounding_px=768, return_all=False):
+        """Image-grounded conditioning: run `images` (one PIL image or a list, training order
+        scene-first) through the Qwen3-VL vision tower, splice the vision tokens into the
+        instruction (one <vision> block per image), run the decoder with deepstack + M-RoPE, and
+        tap the same 12 layers. Returns (ctx (1, seq, 12, 2560), mask) like __call__ — sliced past
+        the system prefix. Torch-free at runtime. Batch size 1."""
         from .vision.preprocess import preprocess_image
 
+        if not isinstance(images, (list, tuple)):
+            images = [images]
         vm = self._load_vision()
-        pv, grid = preprocess_image(image, grounding_px=grounding_px)
-        img_embeds, deepstack = vm(mx.array(pv), mx.array(grid))
-        mx.eval(img_embeds, *deepstack)
-        n_img = img_embeds.shape[0]
+        embeds, deeps, grids = [], [], []
+        for im in images:
+            pv, grid = preprocess_image(im, grounding_px=grounding_px)
+            e, d = vm(mx.array(pv), mx.array(grid))
+            mx.eval(e, *d)
+            embeds.append(e)
+            deeps.append(list(d))
+            grids.append(grid[0])
 
-        ids = self.tokenizer(GROUNDED_TEMPLATE.format(prompt))["input_ids"]
-        ip = ids.index(IMAGE_PAD_ID)
-        ids = ids[:ip] + [IMAGE_PAD_ID] * n_img + ids[ip + 1:]  # expand the single pad to N
-        pos3d, img_slice = _get_rope_index_single(ids, grid[0], merge=2)
+        block = "<|vision_start|><|image_pad|><|vision_end|>"
+        template = PREFIX + block * len(images) + "{}" + SUFFIX
+        ids = self.tokenizer(template.format(prompt))["input_ids"]
+        counts = [e.shape[0] for e in embeds]
+        expanded, k = [], 0
+        for t in ids:  # expand the k-th <image_pad> placeholder to its n_k vision tokens
+            if t == IMAGE_PAD_ID:
+                expanded += [IMAGE_PAD_ID] * counts[k]
+                k += 1
+            else:
+                expanded.append(t)
+        ids = expanded
+        pos3d, img_slices = _get_rope_index(ids, grids, merge=2)
 
         h = self.model.embed_tokens(mx.array(np.array(ids, np.int32))[None])  # (1, L, hidden)
-        i0, i1 = img_slice
-        h[:, i0:i1, :] = img_embeds[None].astype(h.dtype)                     # splice vision tokens
-        all_hs = self.model.forward_grounded(h, mx.array(pos3d), list(deepstack), img_slice)
+        cat_embeds = mx.concatenate(embeds, axis=0)                          # (total_img, hidden)
+        off = 0
+        for s, e in img_slices:
+            h[:, s:e, :] = cat_embeds[off:off + (e - s)][None].astype(h.dtype)
+            off += e - s
+        # deepstack per layer = concat across images (block order), matching img_slices
+        n_deep = len(deeps[0])
+        deepstack = [mx.concatenate([deeps[j][li] for j in range(len(images))], axis=0)
+                     for li in range(n_deep)]
+        all_hs = self.model.forward_grounded(h, mx.array(pos3d), deepstack, img_slices)
         stacked = mx.stack([all_hs[i] for i in SELECT_LAYERS], axis=2)        # (1, L, 12, 2560)
         if return_all:
             return stacked.astype(self.dtype)

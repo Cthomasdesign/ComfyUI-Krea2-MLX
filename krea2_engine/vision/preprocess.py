@@ -41,10 +41,12 @@ def preprocess_image(image, *, patch_size=16, merge_size=2, temporal_patch_size=
     if min_pixels is None:
         min_pixels = factor * factor
     if max_pixels is None:
-        max_pixels = (grounding_px // factor * factor) ** 2 if grounding_px else 1280 * factor * factor
+        # area ceiling from grounding_px, clamped so a tiny/garbage value can't zero it out
+        eff = max(int(grounding_px or 1536), factor)
+        max_pixels = (eff // factor * factor) ** 2
 
     # cap the longest side to grounding_px first (as comfyui-krea2edit does), then snap to the grid
-    if grounding_px and max(h0, w0) > grounding_px:
+    if grounding_px and grounding_px >= factor and max(h0, w0) > grounding_px:
         s = grounding_px / max(h0, w0)
         h0, w0 = round(h0 * s), round(w0 * s)
     rh, rw = smart_resize(h0, w0, factor, min_pixels, max_pixels)
