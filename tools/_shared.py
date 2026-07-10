@@ -68,25 +68,27 @@ def _discover(env_var, candidates, what, hint):
         f"No {what} found. Set {env_var}, or place one at: {' or '.join(candidates)}. {hint}")
 
 
+# ComfyUI model stores to search, most-canonical first: the Comfy Desktop shared store, then a
+# legacy Models/ folder next to the repo. Override either file explicitly with the env var.
+_SHARED = os.path.expanduser("~/ComfyUI-Shared/models")
+_LEGACY = os.path.join(os.path.dirname(REPO), "Models")
+
+
 def default_model():
-    """Transformer build for the test scripts (env KREA2_TEST_MODEL, else <repo>/../Models)."""
-    models = os.path.join(os.path.dirname(REPO), "Models")
-    return _discover(
-        "KREA2_TEST_MODEL",
-        [os.path.join(models, f) for f in
-         ("transformer_mixed_4_8.safetensors", "transformer_8bit.safetensors")],
-        "Krea-2 transformer build",
-        "Download from huggingface.co/avlp12/Krea-2-Turbo-Alis-MLX-mixed-4-8.")
+    """Transformer build for the test scripts (env KREA2_TEST_MODEL, else the ComfyUI model store)."""
+    names = ("transformer_mixed_4_8.safetensors", "transformer_8bit.safetensors")
+    candidates = ([os.path.join(_SHARED, "krea2", n) for n in names]
+                  + [os.path.join(_LEGACY, n) for n in names])
+    return _discover("KREA2_TEST_MODEL", candidates, "Krea-2 transformer build",
+                     "Download from huggingface.co/avlp12/Krea-2-Turbo-Alis-MLX-mixed-4-8.")
 
 
 def default_lora():
-    """Identity-edit LoRA for the edit tests (env KREA2_TEST_LORA, else <repo>/../Models/loras)."""
-    loras = os.path.join(os.path.dirname(REPO), "Models", "loras")
-    return _discover(
-        "KREA2_TEST_LORA",
-        [os.path.join(loras, "krea2_identity_edit_v1.safetensors")],
-        "identity-edit LoRA",
-        "Download from huggingface.co/conradlocke/krea2-identity-edit.")
+    """Identity-edit LoRA for the edit tests (env KREA2_TEST_LORA, else the ComfyUI model store)."""
+    name = "krea2_identity_edit_v1.safetensors"
+    candidates = [os.path.join(_SHARED, "loras", name), os.path.join(_LEGACY, "loras", name)]
+    return _discover("KREA2_TEST_LORA", candidates, "identity-edit LoRA",
+                     "Download from huggingface.co/conradlocke/krea2-identity-edit.")
 
 
 def ref_uint8():
