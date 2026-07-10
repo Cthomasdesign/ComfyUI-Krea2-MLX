@@ -31,8 +31,12 @@ from .krea2_engine.pipeline import Krea2Pipeline
 KREA2_PIPE = "KREA2_PIPE"
 KREA2_LORASTACK = "KREA2_LORASTACK"
 
-# transformer builds are looked up here (idiomatic ComfyUI models/ subfolder)
+# Transformer builds live in a "krea2" model folder. Register the install default
+# (ComfyUI/models/krea2); ComfyUI's extra_model_paths (e.g. a Comfy Desktop shared store) adds
+# any others. All lookups go through folder_paths so every registered location is searched — not
+# just the install folder.
 KREA2_MODELS = os.path.join(folder_paths.models_dir, "krea2")
+folder_paths.add_model_folder_path("krea2", KREA2_MODELS)
 
 # one model resident at a time (a 12.9B transformer won't share unified memory with another)
 _PIPE_CACHE: dict[str, Krea2Pipeline] = {}
@@ -50,12 +54,38 @@ def _precision_for(filename):
     return None
 
 
+def _krea2_dirs():
+    """Every directory ComfyUI searches for krea2 builds (honors extra_model_paths)."""
+    try:
+        dirs = list(folder_paths.get_folder_paths("krea2"))
+    except KeyError:
+        dirs = []
+    if KREA2_MODELS not in dirs:
+        dirs.append(KREA2_MODELS)
+    return dirs
+
+
 def _list_models():
-    """Transformer .safetensors builds found in ComfyUI/models/krea2."""
-    if not os.path.isdir(KREA2_MODELS):
-        return []
-    return [f for f in sorted(os.listdir(KREA2_MODELS))
-            if f.endswith(".safetensors") and _precision_for(f)]
+    """Recipe-inferable transformer builds across all krea2 search paths."""
+    seen = []
+    for d in _krea2_dirs():
+        if os.path.isdir(d):
+            for f in sorted(os.listdir(d)):
+                if f.endswith(".safetensors") and _precision_for(f) and f not in seen:
+                    seen.append(f)
+    return seen
+
+
+def _model_path(model_file):
+    """Resolve a build filename to a full path across the krea2 search paths."""
+    p = folder_paths.get_full_path("krea2", model_file)
+    if p:
+        return p
+    for d in _krea2_dirs():
+        cand = os.path.join(d, model_file)
+        if os.path.isfile(cand):
+            return cand
+    return None
 
 
 def _to_image_tensor(pil_images):
@@ -78,8 +108,8 @@ def _get_pipe(model_file):
         gc.collect()
         import mlx.core as mx
         mx.clear_cache()
-        path = os.path.join(KREA2_MODELS, model_file)
-        _PIPE_CACHE[model_file] = Krea2Pipeline(path, precision=_precision_for(model_file),
+        _PIPE_CACHE[model_file] = Krea2Pipeline(_model_path(model_file),
+                                                precision=_precision_for(model_file),
                                                 base_dir=os.environ.get("KREA2_BASE_DIR"))
     return _PIPE_CACHE[model_file]
 
@@ -160,7 +190,8 @@ class Krea2ModelLoader:
     def load(self, model):
         if not _list_models():
             raise RuntimeError(
-                f"No Krea-2 transformer in {KREA2_MODELS}. Download a build there, e.g. "
+                "No Krea-2 transformer found in any 'krea2' model folder "
+                f"({', '.join(_krea2_dirs())}). Download a build, e.g. "
                 "transformer_mixed_4_8.safetensors from "
                 "huggingface.co/avlp12/Krea-2-Turbo-Alis-MLX-mixed-4-8")
         return (_get_pipe(model),)
