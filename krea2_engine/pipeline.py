@@ -41,7 +41,10 @@ def _http_download(repo: str, filename: str, dest_root: str) -> str:
         total = int(requests.head(url, allow_redirects=True, timeout=30).headers.get("content-length") or 0)
     except Exception:
         total = 0
-    if os.path.exists(dest) and total and os.path.getsize(dest) == total:
+    # Trust a cached file if it matches the known size — or if the size is unknowable (HF's Xet CDN
+    # can 403/redirect a HEAD so no content-length comes back). A present, non-".part" file was only
+    # ever committed complete, so re-downloading it (and risking a 403) is never necessary.
+    if os.path.exists(dest) and (total == 0 or os.path.getsize(dest) == total):
         return dest
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     tmp = dest + ".part"
@@ -82,11 +85,30 @@ def _http_download(repo: str, filename: str, dest_root: str) -> str:
     return dest
 
 
+def _base_dir_ready(dest: str) -> bool:
+    """True if the cached base assets (VAE + text encoder + tokenizer + index) are all present."""
+    import glob
+
+    return bool(
+        os.path.isfile(os.path.join(dest, "model_index.json"))
+        and glob.glob(os.path.join(dest, "text_encoder", "*.safetensors"))
+        and glob.glob(os.path.join(dest, "vae", "*.safetensors"))
+        and os.path.isfile(os.path.join(dest, "tokenizer", "tokenizer.json")))
+
+
 def _base_dir() -> str:
-    """Fetch the VAE / Qwen3-VL-4B encoder / tokenizer from krea/Krea-2-Turbo over HTTP."""
+    """Fetch the VAE / Qwen3-VL-4B encoder / tokenizer from krea/Krea-2-Turbo over HTTP.
+
+    If the assets are already cached, use them with no network round-trip — HF moved this repo to
+    Xet storage, whose CDN can 403 a public re-verification of files we already hold, so probing it
+    on every load is both unnecessary and fragile.
+    """
+    dest = os.path.join(_CACHE, BASE_REPO.replace("/", "__"))
+    if _base_dir_ready(dest):
+        return dest
+
     from huggingface_hub import HfApi
 
-    dest = os.path.join(_CACHE, BASE_REPO.replace("/", "__"))
     exts = (".safetensors", ".json", ".jinja", ".txt", ".model")
     want = [
         s.rfilename for s in HfApi().model_info(BASE_REPO).siblings
