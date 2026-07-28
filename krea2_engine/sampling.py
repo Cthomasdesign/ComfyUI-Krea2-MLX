@@ -83,6 +83,8 @@ def sample(
     y2=1.15,
     mu=None,
     init_noise=None,   # (n,16,H/8,W/8) to match a PT run; else MLX RNG
+    init_latent=None,  # img2img: encoded clean latent (n,16,H/8,W/8); starts denoise at t=strength
+    strength=1.0,      # img2img denoise strength (0=keep input, 1=full txt2img). Ignored if init_latent is None.
     dtype=mx.bfloat16,
     step_callback=None,  # called as step_callback(step, total) after each denoising step
 ):
@@ -113,6 +115,15 @@ def sample(
     x1 = (minres // align) ** 2
     x2 = (maxres // align) ** 2
     ts = timesteps(img.shape[1], steps, x1, x2, y1=y1, y2=y2, mu=mu)
+
+    # img2img: start on the flow trajectory at t≈strength using the encoded input latent
+    # (rectified flow: x_t = (1-t)·x0 + t·noise), and only run the schedule tail from there.
+    if init_latent is not None and strength < 1.0:
+        i0 = next((k for k, _t in enumerate(ts) if _t <= strength), 0)
+        t0 = ts[i0]
+        x0p = patchify(mx.array(init_latent).astype(dtype), patch)  # img currently = patchify(noise)
+        img = (1.0 - t0) * x0p + t0 * img
+        ts = ts[i0:]
 
     # step-invariant conditioning (text fusion, rope, masks) — computed once, reused every step
     fused_ctx, cos, sin, add_mask = transformer.prepare_conditioning(ctx, pos, full_mask, dtype)

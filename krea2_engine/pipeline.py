@@ -33,11 +33,16 @@ def _http_download(repo: str, filename: str, dest_root: str) -> str:
     skips the download if the local file already matches the remote size.
     """
     import requests
+    from huggingface_hub import get_token
 
+    # Gated repos (e.g. krea/Krea-2-Turbo) 401 without auth. get_token() is a local read (no network),
+    # so this keeps the plain-requests / no-Xet approach above.
+    _tok = get_token()
+    _auth = {"Authorization": f"Bearer {_tok}"} if _tok else {}  # no token -> no header
     url = f"https://huggingface.co/{repo}/resolve/main/{filename}"
     dest = os.path.join(dest_root, filename)
     try:
-        total = int(requests.head(url, allow_redirects=True, timeout=30).headers.get("content-length") or 0)
+        total = int(requests.head(url, headers=_auth, allow_redirects=True, timeout=30).headers.get("content-length") or 0)
     except Exception:
         total = 0
     if os.path.exists(dest) and total and os.path.getsize(dest) == total:
@@ -51,7 +56,7 @@ def _http_download(repo: str, filename: str, dest_root: str) -> str:
     if total and pos > total:   # stale/corrupt leftover .part (wrong or changed remote) -> restart clean
         os.remove(tmp)
         pos = 0
-    headers = {"Range": f"bytes={pos}-"} if pos else {}
+    headers = {**_auth, "Range": f"bytes={pos}-"} if pos else dict(_auth)
     with requests.get(url, headers=headers, stream=True, timeout=(30, 120), allow_redirects=True) as r:
         r.raise_for_status()  # 4xx/5xx (gated repo, missing file) surface here, not as a resume hint
         resume = bool(pos) and r.status_code == 206  # 206 => server honored the range

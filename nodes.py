@@ -17,12 +17,14 @@ import os
 
 import numpy as np
 import torch
+from PIL import Image
 
 import folder_paths  # ComfyUI
 from comfy.utils import ProgressBar
 import comfy.model_management as mm
 
 from .krea2_engine.pipeline import Krea2Pipeline
+from .krea2_engine.sampling import sample, to_pil
 
 # custom socket types for passing objects between our nodes
 KREA2_PIPE = "KREA2_PIPE"
@@ -159,6 +161,69 @@ class Krea2Generate:
         return (_to_image_tensor(imgs),)
 
 
+def _img2img_pil(pipe, prompt, pil, strength, steps, seed, num_images, step_callback=None):
+    """Restyle a PIL image through the MLX Krea2 pipeline at the given denoise strength.
+    VAE-encode -> start the flow-matching sampler at t=strength (rectified-flow img2img)."""
+    import mlx.core as mx
+    comp = pipe.vae.spatial_scale          # 8
+    patch = pipe.transformer.cfg.patch     # 2  -> dims must be multiples of comp*patch (16)
+    align = comp * patch
+    W = min(max(((pil.width + align - 1) // align) * align, 256), 2048)
+    H = min(max(((pil.height + align - 1) // align) * align, 256), 2048)
+    im = pil.convert("RGB").resize((W, H), Image.LANCZOS)
+    a = np.asarray(im, np.float32) / 255.0                 # HWC [0,1]
+    x = mx.array(a).transpose(2, 0, 1)[None] * 2 - 1       # (1,3,H,W) in [-1,1] (VAE image space)
+    lat = pipe.vae.encode(x)[:, :, 0]                      # (1,16,H/8,W/8) normalized latent
+    if num_images > 1:
+        lat = mx.broadcast_to(lat, (num_images,) + lat.shape[1:])
+    dec = sample(pipe.transformer, pipe.vae, pipe._encode_cached, [prompt] * num_images,
+                 width=W, height=H, steps=steps, guidance=0.0, seed=seed,
+                 init_latent=lat, strength=float(strength), step_callback=step_callback)
+    return to_pil(dec)
+
+
+class Krea2Img2Img:
+    """Image-conditioned restyle / refine — the img2img counterpart to Krea2Generate."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "krea2_pipe": (KREA2_PIPE,),
+                "image": ("IMAGE",),
+                "prompt": ("STRING", {"multiline": True,
+                                      "default": "an oil painting, thick expressive brushwork, rich texture"}),
+                "strength": ("FLOAT", {"default": 0.55, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "steps": ("INT", {"default": 8, "min": 1, "max": 50}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF}),
+                "num_images": ("INT", {"default": 1, "min": 1, "max": 8}),
+                "safety_filter": ("BOOLEAN", {"default": True, "label_on": "on", "label_off": "off"}),
+            },
+            "optional": {"lora_stack": (KREA2_LORASTACK,)},
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "generate"
+    CATEGORY = "Krea2 MLX"
+
+    def generate(self, krea2_pipe, image, prompt, strength, steps, seed, num_images,
+                 safety_filter=True, lora_stack=None):
+        krea2_pipe.set_loras(lora_stack or [])
+        arr = (image[0].cpu().numpy() * 255.0).clip(0, 255).astype(np.uint8)  # first image = init
+        pil = Image.fromarray(arr)
+        pbar = ProgressBar(steps)
+
+        def cb(step, total):
+            mm.throw_exception_if_processing_interrupted()  # honor ComfyUI's Cancel button
+            pbar.update_absolute(step, total)
+
+        imgs = _img2img_pil(krea2_pipe, prompt, pil, strength, steps, seed, num_images, cb)
+        if safety_filter:
+            from .krea2_engine import safety
+            imgs, _ = safety.apply(imgs, enabled=True)
+        return (_to_image_tensor(imgs),)
+
+
 class Krea2Unload:
     @classmethod
     def INPUT_TYPES(cls):
@@ -182,6 +247,7 @@ NODE_CLASS_MAPPINGS = {
     "Krea2ModelLoader": Krea2ModelLoader,
     "Krea2LoRA": Krea2LoRA,
     "Krea2Generate": Krea2Generate,
+    "Krea2Img2Img": Krea2Img2Img,
     "Krea2Unload": Krea2Unload,
 }
 
@@ -189,5 +255,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Krea2ModelLoader": "Krea2 Model Loader (MLX)",
     "Krea2LoRA": "Krea2 LoRA (MLX)",
     "Krea2Generate": "Krea2 Generate (MLX)",
+    "Krea2Img2Img": "Krea2 Img2Img (MLX)",
     "Krea2Unload": "Krea2 Unload (MLX)",
 }
